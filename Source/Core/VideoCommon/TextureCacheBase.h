@@ -330,7 +330,8 @@ private:
   // Returns an EFB copy staging texture to the pool, so it can be re-used.
   void ReleaseEFBCopyStagingTexture(std::unique_ptr<AbstractStagingTexture> tex);
 
-  bool CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format);
+  bool CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format, u32 layers,
+                            u32 levels);
   void DoSaveState(PointerWrap& p);
   void DoLoadState(PointerWrap& p);
 
@@ -373,7 +374,8 @@ private:
   // Staging texture used for readbacks.
   // We store this in the class so that the same staging texture can be used for multiple
   // readbacks, saving the overhead of allocating a new buffer every time.
-  std::unique_ptr<AbstractStagingTexture> m_readback_texture;
+  std::unordered_map<AbstractTextureFormat, std::unique_ptr<AbstractStagingTexture>>
+      m_readback_textures;
 };
 
 extern std::unique_ptr<TextureCacheBase> g_texture_cache;

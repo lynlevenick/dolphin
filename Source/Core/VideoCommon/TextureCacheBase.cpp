@@ -415,20 +415,31 @@ void TextureCacheBase::ScaleTextureCacheEntryTo(TextureCacheBase::TCacheEntry* e
       config, TexPoolEntry(std::move(new_texture->texture), std::move(new_texture->framebuffer)));
 }
 
-bool TextureCacheBase::CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format)
+bool TextureCacheBase::CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format,
+                                            u32 layers, u32 levels)
 {
-  if (m_readback_texture && m_readback_texture->GetConfig().width >= width &&
-      m_readback_texture->GetConfig().height >= height &&
-      m_readback_texture->GetConfig().format == format)
+  u32 all_width = 0;
+  for (u32 layer = 0; layer < layers; layer++)
+  {
+    for (u32 level = 0; level < levels; level++)
+    {
+      all_width += std::max(width >> level, 1u);
+    }
+  }
+
+  TextureConfig staging_config(std::max(all_width, 128u), std::max(height, 128u), 1, 1, 1, format,
+                               0);
+  auto& readback_texture = m_readback_textures[format];
+
+  if (readback_texture && readback_texture->GetConfig().width >= all_width &&
+      readback_texture->GetConfig().height >= height)
   {
     return true;
   }
 
-  TextureConfig staging_config(std::max(width, 128u), std::max(height, 128u), 1, 1, 1, format, 0);
-  m_readback_texture.reset();
-  m_readback_texture =
-      g_renderer->CreateStagingTexture(StagingTextureType::Readback, staging_config);
-  return m_readback_texture != nullptr;
+  readback_texture.reset();
+  readback_texture = g_renderer->CreateStagingTexture(StagingTextureType::Readback, staging_config);
+  return readback_texture != nullptr;
 }
 
 void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfig& config,
@@ -438,7 +449,8 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
   const bool skip_readback = p.GetMode() == PointerWrap::MODE_MEASURE;
   p.DoPOD(config);
 
-  if (skip_readback || CheckReadbackTexture(config.width, config.height, config.format))
+  if (skip_readback || CheckReadbackTexture(config.width, config.height, config.format,
+                                            config.layers, config.levels))
   {
     // First, measure the amount of memory needed.
     u32 total_size = 0;
@@ -467,32 +479,56 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
       // Save out each layer of the texture to the pointer.
       // This gives us all the sub-images in one single buffer which
       // can be written out to the save state.
+
+      // fixme: the copyfromtexture -> readtexels bit is kind of slow, but
+      // not for the immediately obvious reason (memcpy)...
+      // 1. GPU/CPU allocate buffer
+      //    this buffer in host memory is a gpu-driver allocated space, so
+      //    we can't control it's placement - so we'll need the final copy
+      //    operation to get it into the destination
+      // 2. GPU copy texture to buffer
+      //    the current code blocks on this, spending about 30% of its time
+      //    waiting for it to complete. ideally, this could be avoided by
+      //    delaying submission so fewer distinct blocks have to take place
+      // 3. CPU copy buffer to destination
+      //    unavoidable see 1
+
+      // Save out each layer of the texture to the staging texture, and then
+      // append it onto the end of the vector. This gives us all the sub-images
+      // in one single buffer which can be written out to the save state.
+
+      auto& readback_texture = m_readback_textures.at(config.format);
+      auto dest_rect = MathUtil::Rectangle<int>({-static_cast<int>(config.width), 0, 0, 0});
+
       for (u32 layer = 0; layer < config.layers; layer++)
       {
         for (u32 level = 0; level < config.levels; level++)
         {
-          // fixme: the copyfromtexture -> readtexels bit is kind of slow, but
-          // not for the immediately obvious reason (memcpy)...
-          // 1. GPU/CPU allocate buffer
-          //    this buffer in host memory is a gpu-driver allocated space, so
-          //    we can't control it's placement - so we'll need the final copy
-          //    operation to get it into the destination
-          // 2. GPU copy texture to buffer
-          //    the current code blocks on this, spending about 30% of its time
-          //    waiting for it to complete. ideally, this could be avoided by
-          //    delaying submission so fewer distinct blocks have to take place
-          // 3. CPU copy buffer to destination
-          //    unavoidable see 1
+          dest_rect.left += std::max(config.width >> level, 1u);
+          dest_rect.right = dest_rect.left + std::max(config.width >> level, 1u);
+          dest_rect.bottom = std::max(config.height >> level, 1u);
+
+          auto source_rect = tex->GetConfig().GetMipRect(level);
+          readback_texture->CopyFromTexture(tex, source_rect, layer, level, dest_rect);
+        }
+      }
+
+      dest_rect.left = -static_cast<int>(config.width);
+
+      for (u32 layer = 0; layer < config.layers; layer++)
+      {
+        for (u32 level = 0; level < config.levels; level++)
+        {
+          dest_rect.left += std::max(config.width >> level, 1u);
+          dest_rect.right = dest_rect.left + std::max(config.width >> level, 1u);
+          dest_rect.bottom = std::max(config.height >> level, 1u);
 
           u32 level_width = std::max(config.width >> level, 1u);
           u32 level_height = std::max(config.height >> level, 1u);
-          auto rect = tex->GetConfig().GetMipRect(level);
-          m_readback_texture->CopyFromTexture(tex, rect, layer, level, rect);
-
           u32 stride = AbstractTexture::CalculateStrideForFormat(config.format, level_width);
           u32 size = stride * level_height;
-          m_readback_texture->ReadTexels(rect, texture_data, stride);
 
+          readback_texture->ReadTexels(dest_rect, texture_data, stride);
           texture_data += size;
         }
       }
@@ -667,10 +703,6 @@ void TextureCacheBase::DoSaveState(PointerWrap& p)
     p.Do(it.first);
     p.Do(it.second);
   }
-
-  // Free the readback texture to potentially save host-mapped GPU memory, depending on where
-  // the driver mapped the staging buffer.
-  m_readback_texture.reset();
 }
 
 void TextureCacheBase::DoLoadState(PointerWrap& p)
