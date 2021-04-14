@@ -13,15 +13,22 @@
 // - Zero backwards/forwards compatibility
 // - Serialization code for anything complex has to be manually written.
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
 #include <list>
 #include <map>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <set>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -31,6 +38,12 @@
 #include "Common/Flag.h"
 #include "Common/Inline.h"
 #include "Common/Logging/Log.h"
+#include "Common/Semaphore.h"
+
+// fixme: check if hyperthreading?
+static const u32 COPY_THREADS =
+    std::min(std::initializer_list<u32>({std::thread::hardware_concurrency() - 2, 1}));
+static const u32 ONE_MEGABYTE = 1 * 1024 * 1024;
 
 // XXX: Replace this with std::is_trivially_copyable<T> once we stop using volatile
 // on things that are put in savestates, as volatile types are not trivially copyable.
@@ -51,6 +64,12 @@ public:
 
   u8** ptr;
   Mode mode;
+
+  inline static std::vector<std::thread> threads;
+  inline static Common::Semaphore copySemaphore = Common::Semaphore(0, 8);
+  inline static std::mutex copyJobMutex;
+  inline static std::queue<std::tuple<void *, void *, u32>> copyJobs;
+  inline static std::atomic_uint32_t copyInFlight = 0;
 
 public:
   PointerWrap(u8** ptr_, Mode mode_) : ptr(ptr_), mode(mode_) {}
@@ -184,7 +203,15 @@ public:
   template <typename T, typename std::enable_if_t<IsTriviallyCopyable<T>, int> = 0>
   void DoArray(T* x, u32 count)
   {
-    DoVoid(x, count * sizeof(T));
+    u32 bytes = count * sizeof(T);
+    if ((mode == MODE_READ || mode == MODE_WRITE) && bytes >= ONE_MEGABYTE)
+    {
+      DoVoidLarge(x, bytes);
+    }
+    else
+    {
+      DoVoid(x, bytes);
+    }
   }
 
   template <typename T, typename std::enable_if_t<!IsTriviallyCopyable<T>, int> = 0>
@@ -296,6 +323,27 @@ public:
       member(*this, elem);
   }
 
+  void Wake()
+  {
+    u32 inFlightNow = copyInFlight.load();
+    if (inFlightNow != 0)
+      PanicAlertFmt("Expected 0 jobs in flight, found {}", inFlightNow);
+
+    if (threads.empty())
+    {
+      for (u32 i = 0; i < COPY_THREADS; ++i)
+      {
+        threads.push_back(std::thread(CopyWorker));
+      }
+    }
+  }
+
+  void Join()
+  {
+    while (copyInFlight.load() != 0)
+      CopyWorkUnit();
+  }
+
 private:
   template <typename T>
   void DoContiguousContainer(T& container)
@@ -312,6 +360,57 @@ private:
   void DoContainer(T& x)
   {
     DoEachElement(x, [](PointerWrap& p, typename T::value_type& elem) { p.Do(elem); });
+  }
+
+  void DoVoidLarge(void* data, u32 size)
+  {
+    u8* ptrSaved = *ptr;
+    *ptr += size;
+
+    bool modeIsReadOrWrite = mode == MODE_READ || mode == MODE_WRITE;
+    if (!modeIsReadOrWrite)
+    {
+      DEBUG_ASSERT_MSG(COMMON, modeIsReadOrWrite,
+                       "Savestate failure: path must be read (%d) or write (%d), got %d.\n",
+                       MODE_READ, MODE_WRITE, mode);
+      return; // There's nothing left to do here anyway.
+    }
+
+    {
+      std::scoped_lock<std::mutex> lock(copyJobMutex);
+
+      u32 nextStart = 0;
+      while (nextStart < size)
+      {
+        u32 currentStart = nextStart;
+        nextStart += ONE_MEGABYTE;
+        if (nextStart > size)
+          nextStart = size;
+
+        void* dataOffset = static_cast<void*>(static_cast<u8*>(data) + currentStart);
+        void* ptrOffset = static_cast<void*>(ptrSaved + currentStart);
+
+        switch(mode)
+        {
+        case MODE_READ:
+          copyJobs.push(std::make_tuple(dataOffset, ptrOffset, nextStart - currentStart));
+          break;
+
+        case MODE_WRITE:
+          copyJobs.push(std::make_tuple(ptrOffset, dataOffset, nextStart - currentStart));
+          break;
+
+        default:
+          // Nothing to do here, continue will avoid breaking the threadpool.
+          // This should be impossible to reach, but compilers like having a
+          // default case here.
+          continue;
+        }
+
+        copyInFlight.fetch_add(1);
+        copySemaphore.Post();
+      }
+    }
   }
 
   DOLPHIN_FORCE_INLINE void DoVoid(void* data, u32 size)
@@ -337,5 +436,33 @@ private:
     }
 
     *ptr += size;
+  }
+
+  static void CopyWorkUnit()
+  {
+    std::tuple<void *, void *, u32> job;
+
+    {
+      std::scoped_lock<std::mutex> lock(copyJobMutex);
+      if (copyJobs.empty())
+        return;
+
+      job = std::move(copyJobs.front());
+      copyJobs.pop();
+    }
+
+    std::memcpy(std::get<0>(job), std::get<1>(job), std::get<2>(job));
+    copyInFlight.fetch_add(-1);
+  }
+
+  static void CopyWorker()
+  {
+
+    while(true)
+    {
+      copySemaphore.Wait();
+
+      CopyWorkUnit();
+    }
   }
 };

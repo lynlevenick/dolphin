@@ -268,6 +268,8 @@ bool GameFileCache::SyncCacheFile(bool save)
 
 void GameFileCache::DoState(PointerWrap* p, u64 size)
 {
+  p->Wake();
+
   struct
   {
     u32 revision;
@@ -287,6 +289,8 @@ void GameFileCache::DoState(PointerWrap* p, u64 size)
       elem = std::make_shared<GameFile>();
     elem->DoState(state);
   });
+
+  p->Join();
 }
 
 }  // namespace UICommon

@@ -163,6 +163,8 @@ static bool DoStateVersion(PointerWrap& p, std::string* version_created_by)
 
 static void DoState(PointerWrap& p)
 {
+  p.Wake();
+
   std::string version_created_by;
   if (!DoStateVersion(p, &version_created_by))
   {
@@ -228,6 +230,8 @@ static void DoState(PointerWrap& p)
   p.DoMarker("Wiimote");
   Gecko::DoState(p);
   p.DoMarker("Gecko");
+
+  p.Join();
 }
 
 void LoadFromBuffer(std::vector<u8>& buffer)
