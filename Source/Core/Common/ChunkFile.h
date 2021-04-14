@@ -42,7 +42,7 @@
 
 // fixme: check if hyperthreading?
 static const u32 COPY_THREADS =
-    std::min(std::initializer_list<u32>({std::thread::hardware_concurrency() - 2, 1}));
+    std::min(std::initializer_list<u32>({std::thread::hardware_concurrency() - 3, 1}));
 static const u32 ONE_MEGABYTE = 1 * 1024 * 1024;
 
 // XXX: Replace this with std::is_trivially_copyable<T> once we stop using volatile
@@ -65,11 +65,76 @@ public:
   u8** ptr;
   Mode mode;
 
-  inline static std::vector<std::thread> threads;
-  inline static Common::Semaphore copySemaphore = Common::Semaphore(0, 8);
-  inline static std::mutex copyJobMutex;
-  inline static std::queue<std::tuple<void *, void *, u32>> copyJobs;
-  inline static std::atomic_uint32_t copyInFlight = 0;
+private:
+  class ThreadPool
+  {
+  public:
+    ThreadPool() : m_threads()
+    {
+      for (u32 i = 0; i < COPY_THREADS; ++i)
+        m_threads.push_back(std::thread(WorkerInit, this));
+    }
+    ~ThreadPool()
+    {
+      m_threads_exiting.Set();
+      for (u32 i = 0; i < COPY_THREADS; ++i)
+        m_threads_semaphore.Post();
+
+      for (auto& thread : m_threads)
+        thread.join();
+    }
+
+    void Push(std::tuple<void*, void*, u32>&& job)
+    {
+      std::scoped_lock<std::mutex> lock(m_jobs_mutex);
+      m_jobs.push(job);
+      m_jobs_in_flight.fetch_add(1);
+      m_threads_semaphore.Post();
+    }
+
+    void Work()
+    {
+      std::tuple<void*, void*, u32> job;
+
+      {
+        std::scoped_lock<std::mutex> lock(m_jobs_mutex);
+        if (m_jobs.empty())
+          return;
+
+        job = std::move(m_jobs.front());
+        m_jobs.pop();
+      }
+
+      std::memcpy(std::get<0>(job), std::get<1>(job), std::get<2>(job));
+      m_jobs_in_flight.fetch_add(-1);
+    }
+
+    u32 JobsInFlight() const { return m_jobs_in_flight.load(); }
+
+  private:
+    std::vector<std::thread> m_threads;
+    Common::Flag m_threads_exiting = Common::Flag(false);
+    Common::Semaphore m_threads_semaphore = Common::Semaphore(0, COPY_THREADS);
+    std::mutex m_jobs_mutex;
+    std::queue<std::tuple<void*, void*, u32>> m_jobs;
+    std::atomic_uint32_t m_jobs_in_flight = 0;
+
+    void Worker()
+    {
+      while (true)
+      {
+        m_threads_semaphore.Wait();
+        if (m_threads_exiting.IsSet())
+          return;
+
+        Work();
+      }
+    }
+
+    static void WorkerInit(ThreadPool* that) { that->Worker(); }
+  };
+
+  inline static ThreadPool thread_pool;
 
 public:
   PointerWrap(u8** ptr_, Mode mode_) : ptr(ptr_), mode(mode_) {}
@@ -325,23 +390,15 @@ public:
 
   void Wake()
   {
-    u32 inFlightNow = copyInFlight.load();
+    u32 inFlightNow = thread_pool.JobsInFlight();
     if (inFlightNow != 0)
       PanicAlertFmt("Expected 0 jobs in flight, found {}", inFlightNow);
-
-    if (threads.empty())
-    {
-      for (u32 i = 0; i < COPY_THREADS; ++i)
-      {
-        threads.push_back(std::thread(CopyWorker));
-      }
-    }
   }
 
   void Join()
   {
-    while (copyInFlight.load() != 0)
-      CopyWorkUnit();
+    while (thread_pool.JobsInFlight() != 0)
+      thread_pool.Work();
   }
 
 private:
@@ -364,40 +421,38 @@ private:
 
   void DoVoidLarge(void* data, u32 size)
   {
-    u8* ptrSaved = *ptr;
+    u8* ptr_saved = *ptr;
     *ptr += size;
 
-    bool modeIsReadOrWrite = mode == MODE_READ || mode == MODE_WRITE;
-    if (!modeIsReadOrWrite)
+    bool mode_is_read_or_write = mode == MODE_READ || mode == MODE_WRITE;
+    if (!mode_is_read_or_write)
     {
-      DEBUG_ASSERT_MSG(COMMON, modeIsReadOrWrite,
+      DEBUG_ASSERT_MSG(COMMON, mode_is_read_or_write,
                        "Savestate failure: path must be read (%d) or write (%d), got %d.\n",
                        MODE_READ, MODE_WRITE, mode);
-      return; // There's nothing left to do here anyway.
+      return;  // There's nothing left to do here anyway.
     }
 
     {
-      std::scoped_lock<std::mutex> lock(copyJobMutex);
-
-      u32 nextStart = 0;
-      while (nextStart < size)
+      u32 next_start = 0;
+      while (next_start < size)
       {
-        u32 currentStart = nextStart;
-        nextStart += ONE_MEGABYTE;
-        if (nextStart > size)
-          nextStart = size;
+        u32 current_start = next_start;
+        next_start += ONE_MEGABYTE;
+        if (next_start > size)
+          next_start = size;
 
-        void* dataOffset = static_cast<void*>(static_cast<u8*>(data) + currentStart);
-        void* ptrOffset = static_cast<void*>(ptrSaved + currentStart);
+        void* data_offset = static_cast<void*>(static_cast<u8*>(data) + current_start);
+        void* ptr_offset = static_cast<void*>(ptr_saved + current_start);
 
-        switch(mode)
+        switch (mode)
         {
         case MODE_READ:
-          copyJobs.push(std::make_tuple(dataOffset, ptrOffset, nextStart - currentStart));
+          thread_pool.Push(std::make_tuple(data_offset, ptr_offset, next_start - current_start));
           break;
 
         case MODE_WRITE:
-          copyJobs.push(std::make_tuple(ptrOffset, dataOffset, nextStart - currentStart));
+          thread_pool.Push(std::make_tuple(ptr_offset, data_offset, next_start - current_start));
           break;
 
         default:
@@ -406,9 +461,6 @@ private:
           // default case here.
           continue;
         }
-
-        copyInFlight.fetch_add(1);
-        copySemaphore.Post();
       }
     }
   }
@@ -436,33 +488,5 @@ private:
     }
 
     *ptr += size;
-  }
-
-  static void CopyWorkUnit()
-  {
-    std::tuple<void *, void *, u32> job;
-
-    {
-      std::scoped_lock<std::mutex> lock(copyJobMutex);
-      if (copyJobs.empty())
-        return;
-
-      job = std::move(copyJobs.front());
-      copyJobs.pop();
-    }
-
-    std::memcpy(std::get<0>(job), std::get<1>(job), std::get<2>(job));
-    copyInFlight.fetch_add(-1);
-  }
-
-  static void CopyWorker()
-  {
-
-    while(true)
-    {
-      copySemaphore.Wait();
-
-      CopyWorkUnit();
-    }
   }
 };
