@@ -399,6 +399,9 @@ void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
 
 void DoState(PointerWrap& p)
 {
+  // FIXME-ROLLBACK: These memory copies to the state
+  // are some of the slowest things that get done as
+  // part of saving the state. (~75% of time)
   bool wii = SConfig::GetInstance().bWii;
   p.DoArray(m_pRAM, GetRamSize());
   p.DoArray(m_pL1Cache, GetL1CacheSize());

@@ -148,6 +148,9 @@ static const int DSP_MAIL_SLICE = 72;
 void DoState(PointerWrap& p)
 {
   if (!s_ARAM.wii_mode)
+    // FIXME-ROLLBACK: This memory copy to the state
+    // is one of the slowest things that gets done as
+    // part of saving the state. (~20% of time)
     p.DoArray(s_ARAM.ptr, s_ARAM.size);
   p.DoPOD(s_dspState);
   p.DoPOD(s_audioDMA);

@@ -49,6 +49,11 @@ void SetJit(JitBase* jit)
 }
 void DoState(PointerWrap& p)
 {
+  // FIXME-ROLLBACK: Apparently there's a memory leak
+  // on loading a save state(!) unless the cache is cleared here.
+  // If that could be fixed, then one of the slowest parts
+  // of loading a state could be fixed too, by not clearing
+  // the cache.
   if (g_jit && p.GetMode() == PointerWrap::MODE_READ)
     g_jit->ClearCache();
 }
