@@ -49,7 +49,7 @@ GameFileCache::GameFileCache(std::string path) : m_path(std::move(path))
 
 void GameFileCache::ForEach(std::function<void(const std::shared_ptr<const GameFile>&)> f) const
 {
-  for (const std::shared_ptr<const GameFile>& item : m_cached_files)
+  for (const std::shared_ptr<GameFile>& item : m_cached_files)
     f(item);
 }
 
