@@ -471,6 +471,19 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
       {
         for (u32 level = 0; level < config.levels; level++)
         {
+          // fixme: the copyfromtexture -> readtexels bit is kind of slow, but
+          // not for the immediately obvious reason (memcpy)...
+          // 1. GPU/CPU allocate buffer
+          //    this buffer in host memory is a gpu-driver allocated space, so
+          //    we can't control it's placement - so we'll need the final copy
+          //    operation to get it into the destination
+          // 2. GPU copy texture to buffer
+          //    the current code blocks on this, spending about 30% of its time
+          //    waiting for it to complete. ideally, this could be avoided by
+          //    delaying submission so fewer distinct blocks have to take place
+          // 3. CPU copy buffer to destination
+          //    unavoidable see 1
+
           u32 level_width = std::max(config.width >> level, 1u);
           u32 level_height = std::max(config.height >> level, 1u);
           auto rect = tex->GetConfig().GetMipRect(level);
