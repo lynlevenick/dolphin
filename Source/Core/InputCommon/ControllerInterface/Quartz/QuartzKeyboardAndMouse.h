@@ -67,6 +67,6 @@ public:
 private:
   Common::Vec2 m_cursor;
 
-  uint32_t m_windowid;
+  void* m_window;
 };
 }  // namespace ciface::Quartz

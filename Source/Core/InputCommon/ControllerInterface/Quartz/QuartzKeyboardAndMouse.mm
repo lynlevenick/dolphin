@@ -148,7 +148,7 @@ KeyboardAndMouse::KeyboardAndMouse(void* window)
   AddCombinedInput("Shift", {"Left Shift", "Right Shift"});
   AddCombinedInput("Ctrl", {"Left Control", "Right Control"});
 
-  m_windowid = [[reinterpret_cast<NSView*>(window) window] windowNumber];
+  m_window = window;
 
   // cursor, with a hax for-loop
   for (unsigned int i = 0; i < 4; ++i)
@@ -161,24 +161,7 @@ KeyboardAndMouse::KeyboardAndMouse(void* window)
 
 void KeyboardAndMouse::UpdateInput()
 {
-  CGRect bounds = CGRectZero;
-  CGWindowID windowid[1] = {m_windowid};
-  CFArrayRef windowArray = CFArrayCreate(nullptr, (const void**)windowid, 1, nullptr);
-  CFArrayRef windowDescriptions = CGWindowListCreateDescriptionFromArray(windowArray);
-  CFDictionaryRef windowDescription =
-      static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windowDescriptions, 0));
-
-  if (CFDictionaryContainsKey(windowDescription, kCGWindowBounds))
-  {
-    CFDictionaryRef boundsDictionary =
-        static_cast<CFDictionaryRef>(CFDictionaryGetValue(windowDescription, kCGWindowBounds));
-
-    if (boundsDictionary != nullptr)
-      CGRectMakeWithDictionaryRepresentation(boundsDictionary, &bounds);
-  }
-
-  CFRelease(windowDescriptions);
-  CFRelease(windowArray);
+  CGRect bounds = ((NSWindow*)m_window).frame;
 
   CGEventRef event = CGEventCreate(nil);
   CGPoint loc = CGEventGetLocation(event);
