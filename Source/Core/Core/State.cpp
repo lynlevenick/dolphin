@@ -106,17 +106,19 @@ void EnableCompression(bool compression)
   s_use_compression = compression;
 }
 
+static const auto NUM_FRAMES = 16;
+
 static std::vector<std::tuple<u8*, size_t>> bufs;
 static uint32_t buf_idx;
 void SaveBuf() {
-  const auto idx = (buf_idx = (buf_idx + 1) % 256);
+  const auto idx = (buf_idx = (buf_idx + 1) % NUM_FRAMES);
   auto [data, size] = bufs[idx];
   SaveToPtr(&data, &size);
   bufs[idx] = {data, size};
 }
 
 void LoadBuf() {
-  const auto idx = (buf_idx + 8) % 256;
+  const auto idx = (buf_idx + 8) % NUM_FRAMES;
   const auto [data, _] = bufs[idx];
   LoadFromPtr(data);
 }
@@ -675,7 +677,7 @@ void Init()
   if (lzo_init() != LZO_E_OK)
     PanicAlertFmtT("Internal LZO Error - lzo_init() failed");
 
-  for (auto i = 0; i < 256; ++i) {
+  for (auto i = 0; i < NUM_FRAMES; ++i) {
     bufs.push_back(std::make_tuple(nullptr, 0));
   }
 }
