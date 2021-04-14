@@ -106,6 +106,21 @@ void EnableCompression(bool compression)
   s_use_compression = compression;
 }
 
+static std::vector<std::tuple<u8*, size_t>> bufs;
+static uint32_t buf_idx;
+void SaveBuf() {
+  const auto idx = (buf_idx = (buf_idx + 1) % 256);
+  auto [data, size] = bufs[idx];
+  SaveToPtr(&data, &size);
+  bufs[idx] = {data, size};
+}
+
+void LoadBuf() {
+  const auto idx = (buf_idx + 8) % 256;
+  const auto [data, _] = bufs[idx];
+  LoadFromPtr(data);
+}
+
 // Returns true if state version matches current Dolphin state version, false otherwise.
 static bool DoStateVersion(PointerWrap& p, std::string* version_created_by)
 {
@@ -217,6 +232,11 @@ static void DoState(PointerWrap& p)
 
 void LoadFromBuffer(std::vector<u8>& buffer)
 {
+  LoadFromPtr(buffer.data());
+}
+
+void LoadFromPtr(u8* data)
+{
   if (NetPlay::IsNetPlayRunning())
   {
     OSD::AddMessage("Loading savestates is disabled in Netplay to prevent desyncs");
@@ -225,8 +245,27 @@ void LoadFromBuffer(std::vector<u8>& buffer)
 
   Core::RunOnCPUThread(
       [&] {
-        u8* ptr = &buffer[0];
-        PointerWrap p(&ptr, PointerWrap::MODE_READ);
+        PointerWrap p(&data, PointerWrap::MODE_READ);
+        DoState(p);
+      },
+      true);
+}
+
+void SaveToPtr(u8** data, size_t *size)
+{
+  Core::RunOnCPUThread(
+      [&] {
+        u8* ptr = nullptr;
+        PointerWrap p(&ptr, PointerWrap::MODE_MEASURE);
+
+        DoState(p);
+        const size_t buffer_size = reinterpret_cast<size_t>(ptr);
+        if (buffer_size > *size) {
+          *data = static_cast<u8*>(std::realloc(*data, buffer_size));
+        }
+
+        ptr = *data;
+        p.SetMode(PointerWrap::MODE_WRITE);
         DoState(p);
       },
       true);
@@ -631,6 +670,10 @@ void Init()
 {
   if (lzo_init() != LZO_E_OK)
     PanicAlertFmtT("Internal LZO Error - lzo_init() failed");
+
+  for (auto i = 0; i < 256; ++i) {
+    bufs.push_back(std::make_tuple(nullptr, 0));
+  }
 }
 
 void Shutdown()

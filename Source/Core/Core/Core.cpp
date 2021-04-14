@@ -142,6 +142,8 @@ void FrameUpdateOnCPUThread()
 {
   if (NetPlay::IsNetPlayRunning())
     NetPlay::NetPlayClient::SendTimeBase();
+
+  ::State::SaveBuf();
 }
 
 void OnFrameEnd()

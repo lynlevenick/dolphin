@@ -332,9 +332,12 @@ void MenuBar::AddEmulationMenu()
     connect(menu, &QMenu::aboutToShow, this, &MenuBar::UpdateStateSlotMenu);
 }
 
+static auto rewindStr = QString::fromUtf8("Load Rewind");
+
 void MenuBar::AddStateLoadMenu(QMenu* emu_menu)
 {
   m_state_load_menu = emu_menu->addMenu(tr("&Load State"));
+  m_state_load_menu->addAction(rewindStr, this, &MenuBar::StateRewind);
   m_state_load_menu->addAction(tr("Load State from File"), this, &MenuBar::StateLoad);
   m_state_load_menu->addAction(tr("Load State from Selected Slot"), this, &MenuBar::StateLoadSlot);
   m_state_load_slots_menu = m_state_load_menu->addMenu(tr("Load State from Slot"));

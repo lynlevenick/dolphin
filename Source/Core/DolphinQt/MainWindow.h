@@ -90,6 +90,7 @@ private:
   void ForceStop();
   void Reset();
   void FrameAdvance();
+  void StateRewind();
   void StateLoad();
   void StateSave();
   void StateLoadSlot();

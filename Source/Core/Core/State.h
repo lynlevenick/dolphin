@@ -17,6 +17,9 @@ namespace State
 // number of states
 static const u32 NUM_STATES = 10;
 
+void SaveBuf();
+void LoadBuf();
+
 struct StateHeader
 {
   char gameID[6];
@@ -50,7 +53,9 @@ void Load(int slot);
 void SaveAs(const std::string& filename, bool wait = false);
 void LoadAs(const std::string& filename);
 
+void SaveToPtr(u8** buffer, size_t* size);
 void SaveToBuffer(std::vector<u8>& buffer);
+void LoadFromPtr(u8* buffer);
 void LoadFromBuffer(std::vector<u8>& buffer);
 
 void LoadLastSaved(int i = 1);

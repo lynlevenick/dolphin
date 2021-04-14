@@ -474,6 +474,7 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::Fullscreen, this, &MainWindow::FullScreen);
   connect(m_menu_bar, &MenuBar::FrameAdvance, this, &MainWindow::FrameAdvance);
   connect(m_menu_bar, &MenuBar::Screenshot, this, &MainWindow::ScreenShot);
+  connect(m_menu_bar, &MenuBar::StateRewind, this, &MainWindow::StateRewind);
   connect(m_menu_bar, &MenuBar::StateLoad, this, &MainWindow::StateLoad);
   connect(m_menu_bar, &MenuBar::StateSave, this, &MainWindow::StateSave);
   connect(m_menu_bar, &MenuBar::StateLoadSlot, this, &MainWindow::StateLoadSlot);
@@ -1222,6 +1223,11 @@ void MainWindow::ShowFIFOPlayer()
   m_fifo_window->show();
   m_fifo_window->raise();
   m_fifo_window->activateWindow();
+}
+
+void MainWindow::StateRewind()
+{
+  State::LoadBuf();
 }
 
 void MainWindow::StateLoad()
