@@ -330,7 +330,8 @@ private:
   // Returns an EFB copy staging texture to the pool, so it can be re-used.
   void ReleaseEFBCopyStagingTexture(std::unique_ptr<AbstractStagingTexture> tex);
 
-  bool CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format);
+  bool CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format, u32 layers,
+                            u32 levels);
   void DoSaveState(PointerWrap& p);
   void DoLoadState(PointerWrap& p);
 
@@ -370,10 +371,11 @@ private:
   // so that overlapping textures are written to guest RAM in the order they are issued.
   std::vector<TCacheEntry*> m_pending_efb_copies;
 
-  // Staging texture used for readbacks.
-  // We store this in the class so that the same staging texture can be used for multiple
-  // readbacks, saving the overhead of allocating a new buffer every time.
-  std::unique_ptr<AbstractStagingTexture> m_readback_texture;
+  // Staging textures used for readbacks.
+  // We store these in the class so that the same staging textures can be used for multiple
+  // readbacks, saving the overhead of allocating new buffers every time.
+  std::unordered_map<AbstractTextureFormat, std::unique_ptr<AbstractStagingTexture>>
+      m_readback_textures;
 };
 
 extern std::unique_ptr<TextureCacheBase> g_texture_cache;

@@ -415,20 +415,45 @@ void TextureCacheBase::ScaleTextureCacheEntryTo(TextureCacheBase::TCacheEntry* e
       config, TexPoolEntry(std::move(new_texture->texture), std::move(new_texture->framebuffer)));
 }
 
-bool TextureCacheBase::CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format)
+bool TextureCacheBase::CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format,
+                                            u32 layers, u32 levels)
 {
-  if (m_readback_texture && m_readback_texture->GetConfig().width >= width &&
-      m_readback_texture->GetConfig().height >= height &&
-      m_readback_texture->GetConfig().format == format)
+  // Ensure the readback texture has enough space for all
+  // layers and levels requested to be stored in it simultaneously,
+  // as a larger readback texture minimizes the number of times
+  // GPU flushes must occur.
+
+  // Dumbly pack all layers and levels horizontally. For example,
+  // ------------------------------------------------------------------
+  // |             | layer 0 | lvl 2 |              | layer 1 | lvl 2 |
+  // |   layer 0   | level 1 |-------|   layer 1    | level 1 |-------|
+  // |   level 0   |---------|       |   level 0    |---------|       |
+  // |             |          unused |              |          unused |
+  // ------------------------------------------------------------------
+  // There's better packings available, but this is very simple
+  // and trades memory for CPU time.
+  u32 all_width = 0;
+  for (u32 layer = 0; layer < layers; layer++)
+  {
+    for (u32 level = 0; level < levels; level++)
+    {
+      all_width += std::max(width >> level, 1u);
+    }
+  }
+
+  TextureConfig staging_config(std::max(all_width, 128u), std::max(height, 128u), 1, 1, 1, format,
+                               0);
+  auto& readback_texture = m_readback_textures[format];
+
+  if (readback_texture && readback_texture->GetConfig().width >= all_width &&
+      readback_texture->GetConfig().height >= height)
   {
     return true;
   }
 
-  TextureConfig staging_config(std::max(width, 128u), std::max(height, 128u), 1, 1, 1, format, 0);
-  m_readback_texture.reset();
-  m_readback_texture =
-      g_renderer->CreateStagingTexture(StagingTextureType::Readback, staging_config);
-  return m_readback_texture != nullptr;
+  readback_texture.reset();
+  readback_texture = g_renderer->CreateStagingTexture(StagingTextureType::Readback, staging_config);
+  return readback_texture != nullptr;
 }
 
 void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfig& config,
@@ -438,7 +463,8 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
   const bool skip_readback = p.GetMode() == PointerWrap::MODE_MEASURE;
   p.DoPOD(config);
 
-  if (skip_readback || CheckReadbackTexture(config.width, config.height, config.format))
+  if (skip_readback || CheckReadbackTexture(config.width, config.height, config.format,
+                                            config.layers, config.levels))
   {
     // First, measure the amount of memory needed.
     u32 total_size = 0;
@@ -464,21 +490,46 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
 
     if (!skip_readback)
     {
-      // Save out each layer of the texture to the pointer.
+      auto& readback_texture = m_readback_textures.at(config.format);
+
+      // Request the GPU copy into the readback readback texture all of
+      // the layers and levels of the source texture.
+      // See CheckReadbackTexture for details on layout.
+      auto dest_rect = MathUtil::Rectangle<int>({0, 0, 0, 0});
+
       for (u32 layer = 0; layer < config.layers; layer++)
       {
         for (u32 level = 0; level < config.levels; level++)
         {
+          dest_rect.right = dest_rect.left + std::max(config.width >> level, 1u);
+          dest_rect.bottom = std::max(config.height >> level, 1u);
+
+          auto source_rect = tex->GetConfig().GetMipRect(level);
+          readback_texture->CopyFromTexture(tex, source_rect, layer, level, dest_rect);
+
+          dest_rect.left += std::max(config.width >> level, 1u);
+        }
+      }
+
+      // Copy each layer and level to the texture data.
+      dest_rect.left = 0;
+
+      for (u32 layer = 0; layer < config.layers; layer++)
+      {
+        for (u32 level = 0; level < config.levels; level++)
+        {
+          dest_rect.right = dest_rect.left + std::max(config.width >> level, 1u);
+          dest_rect.bottom = std::max(config.height >> level, 1u);
+
           u32 level_width = std::max(config.width >> level, 1u);
           u32 level_height = std::max(config.height >> level, 1u);
-          auto rect = tex->GetConfig().GetMipRect(level);
-          m_readback_texture->CopyFromTexture(tex, rect, layer, level, rect);
-
           u32 stride = AbstractTexture::CalculateStrideForFormat(config.format, level_width);
           u32 size = stride * level_height;
-          m_readback_texture->ReadTexels(rect, texture_data, stride);
 
+          readback_texture->ReadTexels(dest_rect, texture_data, stride);
           texture_data += size;
+
+          dest_rect.left += std::max(config.width >> level, 1u);
         }
       }
     }
@@ -652,10 +703,6 @@ void TextureCacheBase::DoSaveState(PointerWrap& p)
     p.Do(it.first);
     p.Do(it.second);
   }
-
-  // Free the readback texture to potentially save host-mapped GPU memory, depending on where
-  // the driver mapped the staging buffer.
-  m_readback_texture.reset();
 }
 
 void TextureCacheBase::DoLoadState(PointerWrap& p)
