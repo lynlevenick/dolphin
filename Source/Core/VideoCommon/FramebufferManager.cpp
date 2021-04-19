@@ -924,6 +924,7 @@ void FramebufferManager::DoSaveState(PointerWrap& p)
                                            depth_texture->GetLevels(), depth_texture->GetLayers(),
                                            1, GetEFBDepthCopyFormat(), 0);
   g_texture_cache->SerializeTexture(depth_texture, depth_texture_config, p);
+  g_texture_cache->SerializeFlush();
 }
 
 void FramebufferManager::DoLoadState(PointerWrap& p)

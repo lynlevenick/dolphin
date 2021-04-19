@@ -39,6 +39,8 @@ add_library(videocommon
   GeometryShaderGen.h
   GeometryShaderManager.cpp
   GeometryShaderManager.h
+	GuillotineAllocator.cpp
+	GuillotineAllocator.h
   HiresTextures.cpp
   HiresTextures.h
   HiresTextures_DDSLoader.cpp

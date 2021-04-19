@@ -18,12 +18,13 @@
 #include "Common/CommonTypes.h"
 #include "Common/MathUtil.h"
 #include "VideoCommon/AbstractTexture.h"
+#include "VideoCommon/AbstractStagingTexture.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/GuillotineAllocator.h"
 #include "VideoCommon/TextureConfig.h"
 #include "VideoCommon/TextureDecoder.h"
 
 class AbstractFramebuffer;
-class AbstractStagingTexture;
 class PointerWrap;
 struct VideoConfig;
 
@@ -239,6 +240,7 @@ public:
 
   // Texture Serialization
   void SerializeTexture(AbstractTexture* tex, const TextureConfig& config, PointerWrap& p);
+  void SerializeFlush();
   std::optional<TexPoolEntry> DeserializeTexture(PointerWrap& p);
 
   // Save States
@@ -371,11 +373,30 @@ private:
   // so that overlapping textures are written to guest RAM in the order they are issued.
   std::vector<TCacheEntry*> m_pending_efb_copies;
 
+  struct ReadbackTextureJob
+  {
+    MathUtil::Rectangle<int> dest_rect;
+    u8* texture_data;
+    u32 stride;
+  };
+  class ReadbackTexture
+  {
+  public:
+    ReadbackTexture(std::unique_ptr<AbstractStagingTexture> texture_arg,
+                    GuillotineAllocator&& allocator_arg, std::vector<ReadbackTextureJob> jobs_arg)
+        : texture(std::move(texture_arg)), allocator(std::move(allocator_arg)), jobs(jobs_arg)
+    {
+    }
+
+    std::unique_ptr<AbstractStagingTexture> texture;
+    GuillotineAllocator allocator;
+    std::vector<ReadbackTextureJob> jobs;
+  };
+
   // Staging textures used for readbacks.
   // We store these in the class so that the same staging textures can be used for multiple
   // readbacks, saving the overhead of allocating new buffers every time.
-  std::unordered_map<AbstractTextureFormat, std::unique_ptr<AbstractStagingTexture>>
-      m_readback_textures;
+  std::unordered_map<AbstractTextureFormat, ReadbackTexture> m_readback_textures;
 };
 
 extern std::unique_ptr<TextureCacheBase> g_texture_cache;

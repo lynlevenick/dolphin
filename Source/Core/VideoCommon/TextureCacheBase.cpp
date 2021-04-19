@@ -9,6 +9,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 #if defined(_M_X86) || defined(_M_X86_64)
@@ -418,42 +419,30 @@ void TextureCacheBase::ScaleTextureCacheEntryTo(TextureCacheBase::TCacheEntry* e
 bool TextureCacheBase::CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format,
                                             u32 layers, u32 levels)
 {
-  // Ensure the readback texture has enough space for all
-  // layers and levels requested to be stored in it simultaneously,
-  // as a larger readback texture minimizes the number of times
-  // GPU flushes must occur.
+  // assumes nothing could ever require more than this :)
+  // smarter code would say, the min of this and the next power of 2 after width & height
+  const u32 tex_width = 2048;
+  const u32 tex_height = 2048;
 
-  // Dumbly pack all layers and levels horizontally. For example,
-  // ------------------------------------------------------------------
-  // |             | layer 0 | lvl 2 |              | layer 1 | lvl 2 |
-  // |   layer 0   | level 1 |-------|   layer 1    | level 1 |-------|
-  // |   level 0   |---------|       |   level 0    |---------|       |
-  // |             |          unused |              |          unused |
-  // ------------------------------------------------------------------
-  // There's better packings available, but this is very simple
-  // and trades memory for CPU time.
-  u32 all_width = 0;
-  for (u32 layer = 0; layer < layers; layer++)
+  TextureConfig staging_config(tex_width, tex_height, 1, 1, 1, format, 0);
+  auto readback_texture_it = m_readback_textures.find(format);
+  if (readback_texture_it == m_readback_textures.end())
   {
-    for (u32 level = 0; level < levels; level++)
-    {
-      all_width += std::max(width >> level, 1u);
-    }
-  }
+    auto texture = std::unique_ptr(
+        g_renderer->CreateStagingTexture(StagingTextureType::Readback, staging_config));
+    if (texture == nullptr)
+      return false;
 
-  TextureConfig staging_config(std::max(all_width, 128u), std::max(height, 128u), 1, 1, 1, format,
-                               0);
-  auto& readback_texture = m_readback_textures[format];
-
-  if (readback_texture && readback_texture->GetConfig().width >= all_width &&
-      readback_texture->GetConfig().height >= height)
-  {
+    m_readback_textures.emplace(std::piecewise_construct, std::forward_as_tuple(format),
+                                std::forward_as_tuple(std::move(texture),
+                                                      GuillotineAllocator(tex_width, tex_height),
+                                                      std::vector<ReadbackTextureJob>()));
     return true;
   }
 
-  readback_texture.reset();
-  readback_texture = g_renderer->CreateStagingTexture(StagingTextureType::Readback, staging_config);
-  return readback_texture != nullptr;
+  // fixme: if the width/height of the thing aren't enough, alloc a new one
+
+  return true;
 }
 
 void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfig& config,
@@ -490,46 +479,36 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
 
     if (!skip_readback)
     {
-      auto& readback_texture = m_readback_textures.at(config.format);
+      auto& [readback_texture, allocator, pending] = m_readback_textures.at(config.format);
 
       // Request the GPU copy into the readback readback texture all of
       // the layers and levels of the source texture.
       // See CheckReadbackTexture for details on layout.
-      auto dest_rect = MathUtil::Rectangle<int>({0, 0, 0, 0});
 
       for (u32 layer = 0; layer < config.layers; layer++)
       {
         for (u32 level = 0; level < config.levels; level++)
         {
-          dest_rect.right = dest_rect.left + std::max(config.width >> level, 1u);
-          dest_rect.bottom = std::max(config.height >> level, 1u);
+          const auto requested_width = std::max(config.width >> level, 1u);
+          const auto requested_height = std::max(config.height >> level, 1u);
+          auto dest = allocator.Allocate(requested_width, requested_height);
+          if (!dest.has_value())
+          {
+            SerializeFlush();
+
+            // Flushing serialization means this will definitely succeed
+            // since there will be no pending copies.
+            dest = allocator.Allocate(requested_width, requested_height);
+          }
+
+          const auto dest_rect = dest.value();
+          const u32 stride =
+              AbstractTexture::CalculateStrideForFormat(config.format, requested_width);
 
           auto source_rect = tex->GetConfig().GetMipRect(level);
           readback_texture->CopyFromTexture(tex, source_rect, layer, level, dest_rect);
-
-          dest_rect.left += std::max(config.width >> level, 1u);
-        }
-      }
-
-      // Copy each layer and level to the texture data.
-      dest_rect.left = 0;
-
-      for (u32 layer = 0; layer < config.layers; layer++)
-      {
-        for (u32 level = 0; level < config.levels; level++)
-        {
-          dest_rect.right = dest_rect.left + std::max(config.width >> level, 1u);
-          dest_rect.bottom = std::max(config.height >> level, 1u);
-
-          u32 level_width = std::max(config.width >> level, 1u);
-          u32 level_height = std::max(config.height >> level, 1u);
-          u32 stride = AbstractTexture::CalculateStrideForFormat(config.format, level_width);
-          u32 size = stride * level_height;
-
-          readback_texture->ReadTexels(dest_rect, texture_data, stride);
-          texture_data += size;
-
-          dest_rect.left += std::max(config.width >> level, 1u);
+          pending.emplace_back(ReadbackTextureJob{
+              .dest_rect = dest_rect, .texture_data = texture_data, .stride = stride});
         }
       }
     }
@@ -537,6 +516,18 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
   else
   {
     PanicAlertFmt("Failed to create staging texture for serialization");
+  }
+}
+
+void TextureCacheBase::SerializeFlush()
+{
+  for (auto& [_format, readback_texture] : m_readback_textures)
+  {
+    for (auto& job : readback_texture.jobs)
+      readback_texture.texture->ReadTexels(job.dest_rect, job.texture_data, job.stride);
+
+    readback_texture.allocator.Clear();
+    readback_texture.jobs.clear();
   }
 }
 
@@ -655,6 +646,7 @@ void TextureCacheBase::DoSaveState(PointerWrap& p)
     SerializeTexture(entry->texture.get(), entry->texture->GetConfig(), p);
     entry->DoState(p);
   }
+  SerializeFlush();
   p.DoMarker("TextureCacheEntries");
 
   // Save references for each cache entry.
